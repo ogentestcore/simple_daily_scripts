@@ -1,1 +1,10 @@
 Скрипты общего применения.rar
+__pycache__/
+cookies.txt
+*.cookies
+Youtube_Download/downloads
+Youtube_Download/work
+*.doc*
+work
+downloads
+subtitled
