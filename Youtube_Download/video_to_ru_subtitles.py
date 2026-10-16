@@ -13,9 +13,23 @@
 Как запустить:
   python video_to_ru_subtitles.py "https://www.youtube.com/watch?v=..."
   python video_to_ru_subtitles.py "C:\\путь\\к\\видео.mp4"
+  python video_to_ru_subtitles.py "C:\\путь\\к\\список.txt"     (или .docx — несколько видео подряд)
   — либо без аргумента, тогда скрипт спросит сам.
+  Список: по одной ссылке (или пути к видеофайлу) на строку; пустые строки и строки с # пропускаются.
+  В .docx берутся ссылки из текста, из таблиц и настоящие гиперссылки. Каждое видео обрабатывается
+  отдельно; сбой одного не останавливает остальные, а в конце будет итог и файл work/retry_*.txt.
+  Склейка (--glue, --no-glue, GLUE_VIDEOS): все видео списка в один файл. Субтитры подстраиваются
+  под режим: srt — склеенное видео и общий .srt рядом; soft — видео и общий .srt собираются в один
+  .mkv с дорожкой субтитров; burn — субтитры вшиваются в каждое видео при перекодировании, затем всё
+  склеивается. Время в общем .srt сдвигается на длительность предыдущих видео. Если форматы видео
+  совпадают, склейка идёт без перекодирования (мгновенно), иначе — с перекодированием (долго).
   Режим субтитров можно выбрать при запуске, не правя файл:
   python video_to_ru_subtitles.py "ссылка" --mode srt       (или soft / burn)
+  python video_to_ru_subtitles.py "ссылка" --quality 720    (max / 1080 / 720 / 480)
+  python video_to_ru_subtitles.py "ссылка" --captions off   (ask / manual / any / off)
+  Субтитры YouTube: если у видео на YouTube уже есть субтитры (готовые от автора или автоматические),
+  скрипт предложит взять их вместо распознавания речи — это намного быстрее. Только с вашего согласия
+  (меню; для списка — один общий вопрос заранее). Не получилось скачать или прочитать — распознаёт Whisper.
   Движок перевода (TRANSLATOR в CONFIG; по умолчанию "ask" — спросит меню):
   python video_to_ru_subtitles.py "ссылка" --translator opus      (или ollama)
   Для движка ollama модель берётся из OLLAMA_MODEL (по умолчанию translategemma:4b;
@@ -39,6 +53,7 @@
   + ffmpeg в PATH (или путь в FFMPEG_PATH ниже) — ОБЯЗАТЕЛЕН, на нём держится
     и склейка дорожек, и вшивание субтитров. Сборка с libass (для режима
     "burn") есть в стандартных сборках https://www.gyan.dev/ffmpeg/builds/
+  + для списка в формате .docx:  pip install python-docx
   + для движка opus:  pip install ctranslate2 transformers sentencepiece huggingface_hub
     (ctranslate2 и huggingface_hub обычно уже стоят вместе с faster-whisper).
     Модели скачиваются с Hugging Face при первом запуске и дальше работают офлайн.
@@ -93,6 +108,7 @@
 вас есть права или явное разрешение правообладателя.
 """
 
+import glob
 import importlib.util
 import json
 import os
@@ -115,9 +131,11 @@ WORK_DIR = os.path.join(SCRIPT_DIR, "work")            # промежуточн�
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "subtitled")     # ГОТОВЫЙ результат
 
 # --- Скачивание ---
-MAX_HEIGHT = 1080          # не качать выше этого разрешения (0 = без ограничения).
-                           # Для "burn" видео всё равно перекодируется, а 4K
-                           # перекодируется очень долго.
+# Качество при скачивании: "max" (без ограничения), "1080" (Full HD), "720", "480" или "ask" —
+# спрашивать при каждом запуске. Ключ --quality перекрывает значение. Для "burn" видео всё равно
+# перекодируется, а 4K перекодируется очень долго. На файлы с диска не действует.
+VIDEO_QUALITY = "ask"
+MAX_HEIGHT = 1080          # служебное: итоговый предел, задаётся из VIDEO_QUALITY (0 = без ограничения)
 DENO_PATH = ""             # путь к deno.exe, если нет в PATH (см. youtube_download.py)
 COOKIES_FROM_BROWSER = ""  # "chrome" / "firefox" / "edge" — для сайтов с логином
 COOKIES_FILE = ""          # либо путь к cookies.txt (Netscape)
@@ -201,6 +219,20 @@ AAC_BITRATE = "192k"
 FFMPEG_PATH = "ffmpeg"  # если не в PATH: r"C:\\tools\\ffmpeg\\bin\\ffmpeg.exe"
 
 REUSE_INTERMEDIATE = True   # пропускать шаги, результат которых уже лежит в work/
+
+# Склейка видео из списка (.txt/.docx) в один файл: "ask" — спрашивать, "yes" / "no". Ключи --glue и
+# --no-glue перекрывают значение. Если форматы видео совпадают, склейка мгновенная, иначе все видео
+# приводятся к общему формату и перекодируются — на CPU это долго. Субтитры подстраиваются под режим.
+GLUE_VIDEOS = "ask"
+
+# Субтитры YouTube вместо распознавания речи (только для ссылок на YouTube; всегда с согласия пользователя):
+# "ask"    — спросить, что взять, если у видео есть субтитры (для списка — один общий вопрос заранее);
+# "manual" — брать готовые субтитры автора, если они есть;
+# "any"    — готовые, а если их нет — автоматические субтитры YouTube на языке оригинала;
+# "off"    — никогда, всегда распознавать речь самим. Ключ --captions перекрывает значение.
+# Если субтитры не удалось получить или прочитать, скрипт сам распознаёт речь Whisper.
+CAPTIONS_POLICY = "ask"
+BATCH_NAME = "glued"        # служебное: имя склеенного файла (берётся из имени файла со списком)
 
 # =============================================================================
 
@@ -521,19 +553,14 @@ def locate_downloaded_file(ydl, info: dict) -> str:
     raise FileNotFoundError("скачивание завершилось, но итоговый файл не найден")
 
 
-def step_download(url: str) -> str:
-    from yt_dlp import YoutubeDL
-
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+def ytdlp_base_options() -> dict:
+    """Опции yt-dlp, общие для скачивания видео и субтитров."""
     opts = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title)s [%(id)s].%(ext)s"),
         "noplaylist": True,
         "trim_file_name": TRIM_FILENAME_LENGTH,
         "windowsfilenames": True,
     }
-    if MAX_HEIGHT:
-        opts["format"] = f"bv*[height<=?{MAX_HEIGHT}]+ba/b[height<=?{MAX_HEIGHT}]"
-
     deno = DENO_PATH
     if not deno:  # deno.exe рядом со скриптом подхватываем сами
         for name in ("deno.exe", "deno"):
@@ -548,6 +575,18 @@ def step_download(url: str) -> str:
         opts["cookiesfrombrowser"] = (COOKIES_FROM_BROWSER,)
     elif COOKIES_FILE:
         opts["cookiefile"] = COOKIES_FILE
+    return opts
+
+
+def step_download(url: str) -> str:
+    from yt_dlp import YoutubeDL
+
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    opts = ytdlp_base_options()
+    if MAX_HEIGHT:
+        # res — меньшая сторона кадра (вертикальные ролики не ужимаются). Это предпочтение, а не жёсткий
+        # фильтр: берётся лучшее не выше предела, а если такого нет — ближайшее доступное.
+        opts["format_sort"] = [f"res:{MAX_HEIGHT}"]
 
     try:
         with YoutubeDL(opts) as ydl:
@@ -565,14 +604,247 @@ def step_download(url: str) -> str:
         sys.exit(1)
 
 
+# ------------------------------------- субтитры YouTube вместо распознавания речи
+
+def is_youtube_url(url: str) -> bool:
+    return bool(re.match(r"https?://(www\.|m\.|music\.)?(youtube\.com|youtu\.be)/", url.strip(), re.I))
+
+
+def base_lang(code: str) -> str:
+    """'zh-Hans' -> 'zh', 'en-orig' -> 'en'."""
+    return code.split("-")[0].lower()
+
+
+def build_caption_options(info: dict) -> list:
+    """Какие субтитры YouTube можно взять, от лучшего к худшему. Элемент: kind (manual/auto), role,
+    track (ключ в yt-dlp), lang (язык текста), translate (нужен ли наш перевод), label, tag."""
+    target = LANG_CODES.get(TARGET_LANGUAGE.lower(), "ru")
+    manual = {k: v for k, v in (info.get("subtitles") or {}).items() if v and k != "live_chat"}
+    auto = {k: v for k, v in (info.get("automatic_captions") or {}).items() if v}
+    video_lang = base_lang(info.get("language") or "")
+    options = []
+
+    def add(kind, role, track, lang, translate, label):
+        options.append({"kind": kind, "role": role, "track": track, "lang": lang, "translate": translate,
+                        "label": label, "tag": "." + re.sub(r"[^\w.-]+", "_", f"yt-{kind}-{track}")})
+
+    manual_target = next((k for k in manual if base_lang(k) == target), None)
+    if manual_target:
+        add("manual", "manual-target", manual_target, target, False,
+            f"готовые субтитры автора ({manual_target}) — на целевом языке, перевод не нужен")
+    others = [k for k in manual if base_lang(k) != target]
+    if others:
+        pick = (next((k for k in others if base_lang(k) == video_lang), None)
+                or next((k for k in others if base_lang(k) == "en"), None) or others[0])
+        add("manual", "manual-other", pick, base_lang(pick), True,
+            f"готовые субтитры автора ({pick}) — переведём сами")
+
+    original = next((k for k in auto if k.endswith("-orig")), None)
+    if original is None and video_lang and video_lang in auto:
+        original = video_lang  # старый вариант именования: язык оригинала без суффикса
+    if original:
+        lang = base_lang(original)
+        add("auto", "auto-original", original, lang, lang != target,
+            f"автосубтитры YouTube на языке оригинала ({original}) — распознаны YouTube, качество может быть ниже"
+            + ("" if lang == target else ", переведём сами"))
+    translated = next((k for k in auto if not k.endswith("-orig") and (k == target or k.endswith("-" + target))), None)
+    if translated and not (original and base_lang(original) == target):
+        add("auto", "auto-translation", translated, target, False,
+            f"автоперевод YouTube на {TARGET_LANGUAGE} ({translated}) — машинный перевод машинного распознавания; "
+            "YouTube часто отвечает на такие запросы ошибкой 429")
+    return options
+
+
+def pick_caption_option(options: list, policy: str):
+    """Выбор по политике; при "ask" — меню (это и есть согласие пользователя)."""
+    manual = [o for o in options if o["kind"] == "manual"]
+    if policy == "manual":
+        return manual[0] if manual else None
+    if policy == "any":
+        return manual[0] if manual else next((o for o in options if o["role"] == "auto-original"), None)
+
+    print("\n      На YouTube у этого видео уже есть субтитры. Что использовать?")
+    for i, o in enumerate(options, 1):
+        print(f"        {i} — {o['label']}")
+    whisper_n = len(options) + 1
+    print(f"        {whisper_n} — не брать, распознать речь самим (Whisper) — дольше, но независимо от YouTube")
+    default = 1 if manual else whisper_n
+    while True:
+        choice = ask_input(f"      Выберите 1-{whisper_n} [{default}]: ").strip()
+        if not choice:
+            n = default
+        elif choice.isdigit() and 1 <= int(choice) <= whisper_n:
+            n = int(choice)
+        else:
+            print(f"      Введите число от 1 до {whisper_n}.")
+            continue
+        return options[n - 1] if n <= len(options) else None
+
+
+def fetch_caption_info(url: str):
+    from yt_dlp import YoutubeDL
+
+    opts = ytdlp_base_options()
+    opts.update({"skip_download": True, "quiet": True, "no_warnings": True})
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if info.get("entries"):
+            info = next(e for e in info["entries"] if e)
+        return info
+    except Exception as e:  # noqa: BLE001
+        print(f"      Не удалось узнать, есть ли субтитры YouTube ({str(e).splitlines()[0][:110]}) — "
+              "распознаю речь сам.")
+        return None
+
+
+def download_captions(url: str, option: dict):
+    """Скачивает выбранную дорожку в формате json3 ОТДЕЛЬНЫМ запросом: сбой (например, ошибка 429
+    на автопереводе) не должен мешать скачиванию самого видео. Возвращает путь к файлу или None."""
+    from yt_dlp import YoutubeDL
+
+    opts = ytdlp_base_options()
+    opts.update({"skip_download": True, "quiet": True, "no_warnings": True,
+                 "writesubtitles": option["kind"] == "manual", "writeautomaticsub": option["kind"] == "auto",
+                 "subtitleslangs": [option["track"]], "subtitlesformat": "json3"})
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info.get("entries"):
+                info = next(e for e in info["entries"] if e)
+            stem = os.path.splitext(ydl.prepare_filename(info))[0]
+    except Exception as e:  # noqa: BLE001
+        reason = str(e).splitlines()[0][:110]
+        print(f"      Не удалось скачать субтитры YouTube ({reason})"
+              + (" — YouTube ограничивает частоту запросов, особенно к автопереводу." if "429" in str(e) else "."))
+        return None
+    path = f"{stem}.{option['track']}.json3"
+    if os.path.isfile(path):
+        return path
+    found = glob.glob(glob.escape(stem) + ".*.json3")
+    return found[0] if len(found) == 1 else None
+
+
+NOISE_RE = re.compile(r"[\[\(\{][^\]\)\}]*[\]\)\}]|[♪♫\s]+")  # "[Music]", "(аплодисменты)", "♪♪"
+
+
+def trim_word_overlap(prev: str, cur: str):
+    """Бегущие субтитры повторяют конец прошлой строки в начале следующей. Возвращает cur без
+    повтора ("" — если cur целиком повторяет хвост prev) или None, если повтора нет."""
+    prev_words, cur_words = prev.split(), cur.split()
+    for k in range(min(len(prev_words), len(cur_words)), 1, -1):
+        if prev_words[-k:] == cur_words[:k]:
+            return " ".join(cur_words[k:])
+    return None
+
+
+def dedupe_rollup(items: list) -> list:
+    """Автосубтитры YouTube присылают строки дважды (черновой «рулон» и полную) и повторяют хвост
+    прошлой строки: убираем повторы, склеивая такие события."""
+    out = []
+    for item in items:
+        e = dict(item)
+        if out:
+            last = out[-1]
+            if e["start"] <= last["end"] + 0.5:
+                if e["text"] == last["text"] or e["text"].startswith(last["text"]):
+                    last.update(text=e["text"], end=max(last["end"], e["end"]))
+                    continue
+                if last["text"].startswith(e["text"]):
+                    last["end"] = max(last["end"], e["end"])
+                    continue
+                trimmed = trim_word_overlap(last["text"], e["text"])
+                if trimmed is not None:
+                    if not trimmed:
+                        last["end"] = max(last["end"], e["end"])
+                        continue
+                    e["text"] = trimmed
+        out.append(e)
+    return out
+
+
+def parse_json3(path: str) -> list:
+    """Субтитры YouTube (формат json3) -> реплики [{"timecode", "text"}]."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    raw = []
+    for ev in data.get("events", []):
+        segs = ev.get("segs")
+        if not segs or "tStartMs" not in ev:
+            continue
+        text = re.sub(r"\s+", " ", "".join(s.get("utf8", "") for s in segs)).strip()
+        if not text or NOISE_RE.fullmatch(text):
+            continue
+        start = ev["tStartMs"] / 1000
+        duration = (ev.get("dDurationMs") or 0) / 1000
+        raw.append({"start": start, "end": start + (duration if duration > 0 else 2.0), "text": text})
+    raw.sort(key=lambda e: e["start"])
+    items = dedupe_rollup(raw)
+    for i, e in enumerate(items):  # события могут пересекаться по времени: показываем по одному
+        if i + 1 < len(items) and items[i + 1]["start"] < e["end"]:
+            e["end"] = max(e["start"] + 0.3, items[i + 1]["start"])
+    return [{"timecode": f"{format_timestamp(e['start'])} --> {format_timestamp(e['end'])}", "text": e["text"]}
+            for e in items]
+
+
+def choose_and_fetch_captions(url: str):
+    """Для YouTube-ссылки: узнаёт, какие субтитры есть, выбирает (по политике или у пользователя) и
+    скачивает. Возвращает (вариант, путь_к_json3) или (None, None) — тогда речь распознаёт Whisper."""
+    info = fetch_caption_info(url)
+    if not info or str(info.get("extractor_key", "")).lower() != "youtube":
+        return None, None
+    options = build_caption_options(info)
+    if not options:
+        print("      У видео нет субтитров YouTube — распознаю речь сам.")
+        return None, None
+    option = pick_caption_option(options, CAPTIONS_POLICY)
+    if not option:
+        print("      Субтитры YouTube не используются — распознаю речь сам.")
+        return None, None
+    print(f"      Беру субтитры YouTube: {option['label']}")
+    path = download_captions(url, option)
+    if not path:
+        print("      Субтитры YouTube получить не удалось — распознаю речь сам.")
+        return None, None
+    return option, path
+
+
+def step_get_text(video_path: str, base: str, option, captions_path):
+    """Текст видео: субтитры YouTube, если они получены, иначе распознавание Whisper.
+    Возвращает (реплики, язык, метка_источника_для_кэша)."""
+    if option and captions_path:
+        try:
+            entries = parse_json3(captions_path)
+        except (OSError, ValueError) as e:
+            print(f"      Не удалось прочитать субтитры YouTube ({e}) — распознаю речь сам.")
+            entries = []
+        if entries:
+            print(f"      Использую субтитры YouTube вместо распознавания речи: {len(entries)} реплик.")
+            return entries, option["lang"], option["tag"]
+        print("      В скачанных субтитрах YouTube нет текста — распознаю речь сам.")
+    entries, lang = step_transcribe(video_path, base)
+    return entries, lang, ""
+
+
 # ------------------------------------------------- шаг 2: распознавание речи
+
+_WHISPER_MODELS = {}
+
+
+def get_whisper_model():
+    """Модель грузится один раз за запуск (важно для пакета из нескольких видео)."""
+    from faster_whisper import WhisperModel
+
+    key = (WHISPER_MODEL_SIZE, DEVICE, COMPUTE_TYPE)
+    if key not in _WHISPER_MODELS:
+        print("      Загружаю модель распознавания (при первом запуске скачается)...")
+        _WHISPER_MODELS[key] = WhisperModel(WHISPER_MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
+    return _WHISPER_MODELS[key]
+
 
 def whisper_transcribe(media_path: str):
     """Распознаёт речь в файле. Возвращает (реплики, язык_оригинала)."""
-    from faster_whisper import WhisperModel
-
-    print("      Загружаю модель распознавания (при первом запуске скачается)...")
-    model = WhisperModel(WHISPER_MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
+    model = get_whisper_model()
     segments, info = model.transcribe(media_path, language=LANGUAGE, vad_filter=True)
     total = getattr(info, "duration", 0) or 0
 
@@ -1065,10 +1337,10 @@ def engine_label(engine: str) -> str:
     return "OPUS-MT" if engine == "opus" else f"Ollama: {OLLAMA_MODEL}"
 
 
-def step_translate(entries: list, lang: str, base: str) -> str:
+def step_translate(entries: list, lang: str, base: str, source_tag: str = "") -> str:
     """Возвращает путь к .srt с переводом (в work/)."""
     os.makedirs(WORK_DIR, exist_ok=True)
-    target_srt = os.path.join(WORK_DIR, f"{base}.{TARGET_LANGUAGE}.{engine_slug(TRANSLATOR)}.srt")
+    target_srt = os.path.join(WORK_DIR, f"{base}.{TARGET_LANGUAGE}{source_tag}.{engine_slug(TRANSLATOR)}.srt")
 
     if REUSE_INTERMEDIATE and os.path.isfile(target_srt):
         print("      Найден готовый перевод — шаг пропущен (удалите папку work для пересчёта).")
@@ -1121,7 +1393,7 @@ def step_subtitle_video(video_path: str, srt_path: str, base: str):
 
     if SUBTITLE_MODE == "burn":
         out_path = os.path.join(OUTPUT_DIR, base + ".mp4")
-        style = f"FontName={FONT_NAME},FontSize={FONT_SIZE},Outline={OUTLINE},Shadow=0,MarginV={MARGIN_V}"
+        style = burn_style()
         # Фильтр subtitles плохо переносит пути Windows (двоеточие после диска,
         # обратные слэши, кириллица, скобки в названии). Поэтому копируем .srt
         # во временную папку под простым именем и запускаем ffmpeg ИЗ неё.
@@ -1153,6 +1425,179 @@ def step_subtitle_video(video_path: str, srt_path: str, base: str):
         print("Переведённые субтитры сохранены отдельно:", final_srt)
         sys.exit(1)
     return out_path, final_srt
+
+
+# ---------------------------------------------------------- склейка нескольких видео
+
+def burn_style() -> str:
+    return f"FontName={FONT_NAME},FontSize={FONT_SIZE},Outline={OUTLINE},Shadow=0,MarginV={MARGIN_V}"
+
+
+def parse_fraction(text) -> float:
+    try:
+        num, den = str(text).split("/")
+        return float(num) / float(den) if float(den) else 0.0
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def probe_media(path: str):
+    """Параметры видеофайла через ffprobe или None, если прочитать не удалось."""
+    try:
+        r = subprocess.run(
+            [ffprobe_path(), "-v", "error", "-print_format", "json", "-show_streams", "-show_format", path],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        data = json.loads(r.stdout)
+    except (OSError, ValueError):
+        return None
+    streams = data.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if not video:
+        return None
+    try:
+        duration = float(data["format"]["duration"])
+    except (KeyError, TypeError, ValueError):
+        duration = None
+    fps = parse_fraction(video.get("avg_frame_rate")) or parse_fraction(video.get("r_frame_rate"))
+    return {
+        "duration": duration, "width": int(video.get("width") or 0), "height": int(video.get("height") or 0),
+        "fps": fps, "vcodec": video.get("codec_name"), "profile": video.get("profile"),
+        "level": video.get("level"), "pix_fmt": video.get("pix_fmt"),
+        "has_audio": audio is not None, "acodec": audio.get("codec_name") if audio else None,
+        "sample_rate": audio.get("sample_rate") if audio else None,
+        "channels": audio.get("channels") if audio else None,
+    }
+
+
+def media_signature(info: dict) -> tuple:
+    """Если у всех файлов совпадает, их можно склеить без перекодирования."""
+    return (info["vcodec"], info["profile"], info["level"], info["width"], info["height"], info["pix_fmt"],
+            round(info["fps"], 2), info["has_audio"], info["acodec"], info["sample_rate"], info["channels"])
+
+
+def combine_srts(srt_paths: list, durations: list) -> list:
+    """Объединяет субтитры нескольких видео в один список, сдвигая время на длительность предыдущих."""
+    combined, offset = [], 0.0
+    for path, duration in zip(srt_paths, durations):
+        for entry in read_srt(path):
+            bounds = timecode_bounds(entry["timecode"])
+            if bounds:
+                entry = {"timecode": f"{format_timestamp(bounds[0] + offset)} --> "
+                                     f"{format_timestamp(bounds[1] + offset)}", "text": entry["text"]}
+            combined.append(entry)
+        offset += duration
+    return combined
+
+
+def normalize_segment(src: str, info: dict, target: tuple, tmp: str, out_name: str, srt_path=None):
+    """Приводит видео к общему формату (размер, частота кадров, H.264/AAC); при srt_path — вшивает
+    субтитры за тот же проход. Запускается из папки tmp (так проще с путями Windows)."""
+    width, height, fps = target
+    vf = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+          f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p")
+    if srt_path:
+        shutil.copyfile(srt_path, os.path.join(tmp, "subs.srt"))
+        vf += f",subtitles=subs.srt:force_style='{burn_style()}'"
+    args = ["-i", os.path.abspath(src)]
+    if not info["has_audio"]:  # у склеиваемых роликов должна быть звуковая дорожка — добавим тишину
+        args += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+    args += ["-vf", vf, "-map", "0:v:0", "-map", "0:a:0" if info["has_audio"] else "1:a:0",
+             "-c:v", "libx264", "-crf", str(CRF), "-preset", X264_PRESET, "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", AAC_BITRATE, "-ar", "48000", "-ac", "2"]
+    if not info["has_audio"]:
+        args += ["-shortest"]
+    return run_ffmpeg(args + ["-movflags", "+faststart", out_name], cwd=tmp, duration=info["duration"])
+
+
+def concat_segments(segments: list, out_path: str, tmp: str):
+    """Склейка без перекодирования (concat-демультиплексор)."""
+    list_path = os.path.join(tmp, "concat.txt")
+    with open(list_path, "w", encoding="utf-8") as f:
+        for seg in segments:
+            safe = os.path.abspath(seg).replace("\\", "/").replace("'", "'\\''")
+            f.write(f"file '{safe}'\n")
+    return run_ffmpeg(["-f", "concat", "-safe", "0", "-i", list_path, "-map", "0:v:0", "-map", "0:a:0?",
+                       "-c", "copy", "-movflags", "+faststart", out_path], cwd=tmp)
+
+
+def glue_videos(done: list, name: str):
+    """Склеивает видео в один файл, субтитры — в один .srt (время сдвигается). Что получится,
+    зависит от режима: srt — склеенное видео + общий .srt; soft — склеенное видео и общий .srt,
+    собранные в один .mkv с дорожкой субтитров; burn — субтитры вшиваются в каждое видео за один и тот же
+    проход перекодирования, затем всё склеивается. done = [(видео, .srt)] в порядке списка.
+    Возвращает (файл_для_просмотра, файл_субтитров)."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(WORK_DIR, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="glue_", dir=WORK_DIR)  # временные файлы — внутри папки проекта, не на системном диске
+    try:
+        infos = []
+        for video, _ in done:
+            info = probe_media(video)
+            if not info or not info["duration"]:
+                raise RuntimeError(f"не удалось прочитать видео через ffprobe (он ставится вместе с ffmpeg): {video}")
+            infos.append(info)
+        srts = [srt for _, srt in done]
+
+        first = infos[0]
+        width, height = first["width"] - first["width"] % 2, first["height"] - first["height"] % 2
+        fps = first["fps"] if 0 < first["fps"] <= 60 else 30
+        target = (width, height, f"{fps:.3f}")
+
+        burn = SUBTITLE_MODE == "burn"
+        all_copyable = (not burn and len({media_signature(i) for i in infos}) == 1
+                        and all(i["has_audio"] for i in infos))
+        plans = (["copy"] if all_copyable else []) + ["encode"]
+
+        glued = durations = None
+        for plan in plans:
+            if plan == "copy":
+                print("      Форматы всех видео совпадают — склеиваю без перекодирования.")
+                segments = [video for video, _ in done]
+            else:
+                print(f"      Привожу видео к общему формату {width}x{height} и перекодирую"
+                      + (" (субтитры вшиваются за этот же проход)" if burn else "") + " — это долго.")
+                segments = []
+                for i, ((video, srt), info) in enumerate(zip(done, infos), 1):
+                    seg = f"seg_{i:03d}.mp4"
+                    print(f"      [{i}/{len(done)}] {os.path.basename(video)}")
+                    ok, err = normalize_segment(video, info, target, tmp, os.path.join(tmp, seg),
+                                                srt if burn else None)
+                    if not ok:
+                        raise RuntimeError(f"ffmpeg не смог обработать {os.path.basename(video)}:\n{err}")
+                    segments.append(os.path.join(tmp, seg))
+
+            seg_infos = [probe_media(s) for s in segments]
+            if not all(si and si["duration"] for si in seg_infos):
+                raise RuntimeError("не удалось измерить длительность частей перед склейкой")
+            durations = [si["duration"] for si in seg_infos]
+
+            h264_aac = all(si["vcodec"] == "h264" and si["acodec"] == "aac" for si in seg_infos)
+            ext = ".mp4" if (plan == "encode" or h264_aac) else ".mkv"
+            glued = os.path.join(tmp, "glued" + ext)
+            ok, err = concat_segments(segments, glued, tmp)
+            result = probe_media(glued) if ok else None
+            expected = sum(durations)
+            if ok and result and result["duration"] and abs(result["duration"] - expected) <= max(2.0, expected * 0.01):
+                break
+            if plan == "copy":
+                print("      Склейка без перекодирования дала неверный результат — перекодирую.")
+                glued = None
+                continue
+            raise RuntimeError(f"склейка не удалась или получилась неверной длины:\n{err}")
+
+        combined_srt = os.path.join(tmp, "combined.srt")
+        write_srt(combine_srts(srts, durations), combined_srt)
+
+        if SUBTITLE_MODE == "soft":
+            return step_subtitle_video(glued, combined_srt, name)  # .mkv с дорожкой + общий .srt
+        final_video = os.path.join(OUTPUT_DIR, name + os.path.splitext(glued)[1])
+        final_srt = os.path.join(OUTPUT_DIR, name + ".srt")
+        shutil.move(glued, final_video)
+        shutil.copyfile(combined_srt, final_srt)
+        return final_video, final_srt
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ------------------------------------------------------- параметры запуска
@@ -1197,17 +1642,89 @@ def resolve_mode(cli_mode):
         print("Введите 1, 2 или 3.")
 
 
+URL_RE = re.compile(r"https?://[^\s<>\"']+")
+
+
+def read_text_file(path: str) -> str:
+    for enc in ("utf-8-sig", "cp1251"):  # Блокнот Windows нередко сохраняет в cp1251
+        try:
+            with open(path, encoding=enc) as f:
+                return f.read()
+        except UnicodeDecodeError:
+            continue
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def read_batch_file(path: str) -> list:
+    """.txt / .docx со списком -> [("url", ссылка) | ("file", путь)] без повторов.
+    В .txt — по одной строке (пустые и начинающиеся с # пропускаются; если в строке есть
+    ссылка, берётся она, остальной текст игнорируется). В .docx — обычные ссылки в тексте и
+    настоящие гиперссылки, в абзацах и таблицах; строка с путём к существующему файлу тоже годится."""
+    ext = os.path.splitext(path)[1].lower()
+    lines = []
+    if ext == ".txt":
+        lines = read_text_file(path).splitlines()
+    else:
+        if not module_available("docx"):
+            print("Для чтения .docx нужна библиотека:  pip install python-docx")
+            sys.exit(1)
+        from docx import Document
+
+        doc = Document(path)
+        for rel in doc.part.rels.values():  # гиперссылки: текст ссылки может не совпадать с адресом
+            target = getattr(rel, "target_ref", "") or ""
+            if "hyperlink" in rel.reltype and target.startswith("http"):
+                lines.append(target)
+        lines += [para.text for para in doc.paragraphs]
+        for table in doc.tables:
+            for row in table.rows:
+                lines += [cell.text for cell in row.cells]
+
+    items, skipped, seen = [], [], set()
+    for raw in lines:
+        line = raw.strip().strip('"').strip("'")
+        if not line or line.startswith("#"):
+            continue
+        urls = URL_RE.findall(line)
+        if urls:
+            candidates = [("url", u.rstrip(").,;»")) for u in urls]
+        elif os.path.isfile(line):
+            candidates = [("file", os.path.abspath(line))]
+        else:
+            skipped.append(line)
+            continue
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                items.append(c)
+    if skipped:
+        print(f"      Пропущено строк (не ссылка и не существующий файл): {len(skipped)}"
+              + (f", например: {skipped[0][:60]}" if skipped else ""))
+    return items
+
+
 def resolve_source():
-    raw = sys.argv[1] if len(sys.argv) > 1 else ask_input("Ссылка на видео ИЛИ путь к видеофайлу: ")
+    raw = sys.argv[1] if len(sys.argv) > 1 else ask_input(
+        "Ссылка на видео, путь к видеофайлу ИЛИ к списку (.txt / .docx): ")
     raw = raw.strip().strip('"').strip("'")
     if not raw:
         print("Ничего не указано.")
         sys.exit(1)
+    if os.path.isfile(raw) and os.path.splitext(raw)[1].lower() in (".txt", ".docx"):
+        items = read_batch_file(raw)
+        if not items:
+            print("В файле не найдено ни одной ссылки или существующего файла.")
+            sys.exit(1)
+        global BATCH_NAME
+        BATCH_NAME = re.sub(r'[\\/:*?"<>|]+', "_", os.path.splitext(os.path.basename(raw))[0]).strip() or "glued"
+        print(f"      В списке найдено видео: {len(items)}")
+        return "batch", items
     if os.path.isfile(raw):
         return "file", os.path.abspath(raw)
     if re.match(r"https?://", raw):
         return "url", raw
-    print("Это не похоже ни на ссылку (http...), ни на существующий файл.")
+    print("Это не похоже ни на ссылку (http...), ни на существующий файл или список.")
     sys.exit(1)
 
 
@@ -1221,6 +1738,93 @@ def ask_input(prompt: str) -> str:
               "(в VS Code: терминал внизу, а не панель Output / Code Runner) либо задайте значения "
               "заранее: --translator, --model, --mode или соответствующие строки в CONFIG.")
         sys.exit(1)
+
+
+QUALITY_VALUES = {"max": 0, "макс": 0, "1080": 1080, "fullhd": 1080, "fhd": 1080,
+                  "720": 720, "hd": 720, "480": 480}
+
+
+def resolve_quality(cli_quality):
+    """Определяет предел качества скачивания: --quality > VIDEO_QUALITY; "ask" -> спрашивает."""
+    global VIDEO_QUALITY, MAX_HEIGHT
+    if cli_quality:
+        VIDEO_QUALITY = cli_quality.strip().lower()
+    if VIDEO_QUALITY == "ask":
+        print("\nКачество скачиваемого видео?")
+        print("  1 — максимальное (без ограничения; 4K качается и обрабатывается очень долго)")
+        print("  2 — Full HD, 1080p")
+        print("  3 — 720p")
+        print("  4 — 480p (быстрее всего и меньше места)")
+        while True:
+            choice = ask_input("Выберите 1-4 [2]: ").strip().lower()
+            picked = {"": "1080", "1": "max", "2": "1080", "3": "720", "4": "480"}.get(choice)
+            if picked is None and choice in QUALITY_VALUES:
+                picked = choice
+            if picked:
+                VIDEO_QUALITY = picked
+                break
+            print("Введите число от 1 до 4.")
+    key = VIDEO_QUALITY.replace("p", "")  # "720p" -> "720"
+    if key not in QUALITY_VALUES:
+        print(f'Неизвестное качество "{VIDEO_QUALITY}". Допустимо: max, 1080, 720, 480, ask.')
+        sys.exit(1)
+    MAX_HEIGHT = QUALITY_VALUES[key]
+
+
+def resolve_glue(cli_glue, cli_no_glue, count: int) -> bool:
+    """Склеивать ли видео пакета: --glue / --no-glue > GLUE_VIDEOS; "ask" -> спрашивает."""
+    if count < 2:
+        return False
+    if cli_glue:
+        return True
+    if cli_no_glue:
+        return False
+    value = GLUE_VIDEOS.strip().lower()
+    if value == "ask":
+        print("\nСклеить все видео в один файл?")
+        print("  1 — нет, оставить каждое отдельно")
+        print("  2 — да: один ролик с общими субтитрами (если форматы не совпадают, видео")
+        print("      перекодируются в общий формат — на CPU долго)")
+        while True:
+            choice = ask_input("Выберите 1 или 2 [1]: ").strip().lower()
+            if choice in ("", "1", "нет", "no"):
+                return False
+            if choice in ("2", "да", "yes"):
+                return True
+            print("Введите 1 или 2.")
+    return value in ("yes", "да", "true", "1")
+
+
+def resolve_captions(cli_captions, items: list):
+    """Политика использования субтитров YouTube: --captions > CAPTIONS_POLICY. Для списка из
+    нескольких YouTube-ссылок "ask" превращается в один общий вопрос заранее."""
+    global CAPTIONS_POLICY
+    if cli_captions:
+        CAPTIONS_POLICY = cli_captions.strip().lower()
+    if CAPTIONS_POLICY not in ("ask", "manual", "any", "off"):
+        print(f'Неизвестное значение captions "{CAPTIONS_POLICY}". Допустимо: ask, manual, any, off.')
+        sys.exit(1)
+    youtube = [src for kind, src in items if kind == "url" and is_youtube_url(src)]
+    if not youtube:
+        CAPTIONS_POLICY = "off"
+        return
+    if CAPTIONS_POLICY == "ask" and len(youtube) >= 2:
+        print("\nЕсли у видео на YouTube уже есть субтитры, использовать их вместо распознавания речи?")
+        print("  1 — спрашивать по каждому видео")
+        print("  2 — да, готовые субтитры автора (автоматические не брать)")
+        print("  3 — да, готовые, а если нет — автоматические субтитры YouTube на языке оригинала")
+        print("  4 — нет, всегда распознавать речь самим (Whisper)")
+        while True:
+            choice = ask_input("Выберите 1-4 [1]: ").strip()
+            picked = {"": "ask", "1": "ask", "2": "manual", "3": "any", "4": "off"}.get(choice)
+            if picked:
+                CAPTIONS_POLICY = picked
+                break
+            print("Введите число от 1 до 4.")
+
+
+def quality_label() -> str:
+    return "максимальное" if not MAX_HEIGHT else f"до {MAX_HEIGHT}p"
 
 
 def pop_cli_flag(name: str) -> bool:
@@ -1453,45 +2057,81 @@ def main():
     print("=" * 62)
 
     compare = pop_cli_flag("--compare")
+    cli_glue = pop_cli_flag("--glue")
+    cli_no_glue = pop_cli_flag("--no-glue")
     cli_mode = (pop_cli_option("--mode") or "").lower() or None
     cli_model = pop_cli_option("--model")
     cli_translator = pop_cli_option("--translator")
+    cli_quality = pop_cli_option("--quality")
+    cli_captions = pop_cli_option("--captions")
     cli_engines = pop_cli_option("--engines")
     if cli_engines:
         COMPARE_ENGINES[:] = parse_engines_option(cli_engines)
     kind, source = resolve_source()
 
     if compare:
+        if kind == "batch":
+            print("      Для --compare из списка берётся только первое видео.")
+            kind, source = source[0]
         main_compare(kind, source)
         return
 
+    items = source if kind == "batch" else [(kind, source)]
+    needs_download = any(k == "url" for k, _ in items)
+
     resolve_mode(cli_mode)
     resolve_translator(cli_translator)
-    installed = preflight(needs_download=(kind == "url"), translator=TRANSLATOR)
+    if needs_download:
+        resolve_quality(cli_quality)
+    resolve_captions(cli_captions, items)
+    glue = resolve_glue(cli_glue, cli_no_glue, len(items)) if kind == "batch" else False
+    installed = preflight(needs_download=needs_download, translator=TRANSLATOR)
     if TRANSLATOR == "ollama":
         resolve_model(cli_model, installed)
-    t_start = time.time()
 
-    print(f"\nРежим субтитров: {SUBTITLE_MODE} | переводчик: {engine_label(TRANSLATOR)}")
+    print(f"\nРежим субтитров: {SUBTITLE_MODE} | переводчик: {engine_label(TRANSLATOR)}"
+          + (f" | качество: {quality_label()}" if needs_download else "")
+          + (" | склейка: да" if glue else "")
+          + (f" | субтитры YouTube: {CAPTIONS_POLICY}" if CAPTIONS_POLICY != "off" else ""))
 
+    if kind == "batch":
+        run_batch(items, glue)
+    else:
+        t_start = time.time()
+        final_video, final_srt = process_one(kind, source)
+        print_done(t_start, final_video, final_srt)
+
+
+def process_one(kind: str, source: str, finish: bool = True):
+    """Весь конвейер для одного видео. Возвращает (файл_для_просмотра, файл_субтитров);
+    при finish=False останавливается перед шагом 4 и возвращает (видео, перевод .srt)."""
     print("\n[1/4] Получение видео...")
+    option = captions_path = None
+    if kind == "url" and CAPTIONS_POLICY != "off" and is_youtube_url(source):
+        option, captions_path = choose_and_fetch_captions(source)
     video_path = step_download(source) if kind == "url" else source
     base = os.path.splitext(os.path.basename(video_path))[0]
     print(f"      Готово: {os.path.basename(video_path)}")
 
-    print("\n[2/4] Распознавание речи (дольше всего на CPU — может занять много минут)...")
-    entries, lang = step_transcribe(video_path, base)
+    print("\n[2/4] Текст видео: субтитры YouTube или распознавание речи "
+          "(Whisper дольше всего на CPU — может занять много минут)...")
+    entries, lang, source_tag = step_get_text(video_path, base, option, captions_path)
     print(f"      Готово: {len(entries)} реплик (язык оригинала: {lang})")
 
     print(f"\n[3/4] Перевод субтитров на {TARGET_LANGUAGE} ({engine_label(TRANSLATOR)})...")
-    srt_path = step_translate(entries, lang, base)
+    srt_path = step_translate(entries, lang, base, source_tag)
     print("      Готово.")
 
+    if not finish:
+        print("\n[4/4] Субтитры: будут добавлены при склейке всех видео.")
+        return video_path, srt_path
     mode_name = {"srt": "кладу файл субтитров рядом с видео", "soft": "добавляю дорожкой",
                  "burn": "вшиваю в картинку (перекодирование)"}[SUBTITLE_MODE]
     print(f"\n[4/4] Субтитры: {mode_name}...")
-    final_video, final_srt = step_subtitle_video(video_path, srt_path, base)
+    return step_subtitle_video(video_path, srt_path, base)
 
+
+def print_done(t_start: float, final_video: str, final_srt: str):
     print("\n" + "=" * 62)
     print(f"  ВСЁ ГОТОВО за {fmt_duration(time.time() - t_start)}")
     print(f"    Видео:    {final_video}")
@@ -1500,6 +2140,69 @@ def main():
         print("  Откройте видео в VLC или PotPlayer — русские субтитры подхватятся сами")
         print("  (если нет — перетащите .srt в окно плеера).")
     print("=" * 62)
+
+
+def run_batch(items: list, glue: bool = False):
+    """Каждое видео — отдельно. Сбой одного не останавливает остальные; в конце — итог и файл со
+    списком неудавшихся для повторного запуска (готовые шаги тогда пропускаются). При glue=True
+    после обработки всех видео они склеиваются в один файл с общими субтитрами."""
+    total, results, done, t_all = len(items), [], [], time.time()
+    for i, (kind, source) in enumerate(items, 1):
+        label = source if kind == "url" else os.path.basename(source)
+        print("\n" + "#" * 62)
+        print(f"  ВИДЕО {i} из {total}: {label}")
+        print("#" * 62)
+        t0 = time.time()
+        try:
+            final_video, final_srt = process_one(kind, source, finish=not glue)
+            print(f"\n  Готово за {fmt_duration(time.time() - t0)}: {final_srt}")
+            results.append((source, True, final_srt))
+            done.append((final_video, final_srt))
+        except SystemExit:
+            results.append((source, False, "остановлено ошибкой (причина — в сообщении выше)"))
+        except Exception as e:  # noqa: BLE001 — пакет должен идти дальше
+            print(f"\nОшибка: {type(e).__name__}: {e}")
+            results.append((source, False, f"{type(e).__name__}: {e}"))
+
+    glued, glue_error = None, None
+    if glue:
+        print("\n" + "#" * 62)
+        print(f"  СКЛЕЙКА {len(done)} видео в один файл: {BATCH_NAME}")
+        print("#" * 62)
+        if len(done) < 2:
+            glue_error = "для склейки нужно минимум 2 успешно обработанных видео"
+            print(f"  {glue_error}.")
+        else:
+            try:
+                glued = glue_videos(done, BATCH_NAME)
+            except SystemExit:
+                glue_error = "склейка остановлена ошибкой (см. сообщение выше)"
+            except Exception as e:  # noqa: BLE001
+                glue_error = f"{type(e).__name__}: {e}"
+                print(f"\nОшибка склейки: {glue_error}")
+            if glue_error:
+                print("  Переводы отдельных видео сохранены в work/ — запуск без склейки (--no-glue) "
+                      "их подхватит быстро.")
+
+    failed = [r for r in results if not r[1]]
+    print("\n" + "=" * 62)
+    print(f"  ИТОГ ПАКЕТА: успешно {total - len(failed)} из {total}, за {fmt_duration(time.time() - t_all)}")
+    for source, ok, info in results:
+        print(f"    {'+' if ok else 'x'} {source if not ok else info}" + ("" if ok else f"\n        {info}"))
+    if glued:
+        print(f"  Склеенное видео: {glued[0]}")
+        print(f"  Общие субтитры:  {glued[1]}")
+    elif glue_error:
+        print(f"  Склейка не выполнена: {glue_error}")
+    if failed:
+        os.makedirs(WORK_DIR, exist_ok=True)
+        retry_path = os.path.join(WORK_DIR, f"retry_{time.strftime('%Y%m%d-%H%M%S')}.txt")
+        with open(retry_path, "w", encoding="utf-8") as f:
+            f.writelines(source + "\n" for source, _, _ in failed)
+        print(f"  Список для повторного запуска (передайте его скрипту как файл): {retry_path}")
+    print("=" * 62)
+    if failed or glue_error:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
